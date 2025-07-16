@@ -85,6 +85,7 @@ uint8_t EEPROM_ReadByte(uint16_t address);
 void EEPROM_Test(void);
 void EEPROM_TestArray(void);
 void EEPROM_EraseChip(void);
+void EEPROM_WritePageData(uint16_t address, uint8_t* data, uint16_t length);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -529,27 +530,101 @@ void EEPROM_WriteByte(uint16_t address, uint8_t data) {
     EEPROM_WaitReady();
 }
 
-// запись массива в EEPROM
-void EEPROM_WriteArray(uint16_t start_address, uint8_t* data, uint16_t length) {
 
-    for (uint16_t i = 0; i < length; i++) {
-        EEPROM_WriteByte(start_address + i, data[i]);
-        HAL_Delay(10);
+void EEPROM_WriteArrayPaged(uint16_t start_address, uint8_t* data, uint16_t length) {
+    const uint16_t PAGE_SIZE = 32; // Размер страницы для большинства EEPROM
+    uint16_t bytes_written = 0;
 
+    while (bytes_written < length) {
+        uint16_t current_address = start_address + bytes_written;
+        uint16_t page_offset = current_address % PAGE_SIZE;
+        uint16_t bytes_to_write = PAGE_SIZE - page_offset;
+
+        // Не записываем больше чем осталось данных
+        if (bytes_to_write > (length - bytes_written)) {
+            bytes_to_write = length - bytes_written;
+        }
+
+        // Записываем страницу
+        EEPROM_WritePageData(current_address, &data[bytes_written], bytes_to_write);
+        bytes_written += bytes_to_write;
     }
-
-    HAL_UART_Transmit(&huart1, (uint8_t*)"Zapisano\r\n", 10, 100);
 }
 
-// чтениe массива из EEPROM
-void EEPROM_ReadArray(uint16_t start_address, uint8_t* data, uint16_t length) {
+// Функция для записи страницы данных
+void EEPROM_WritePageData(uint16_t address, uint8_t* data, uint16_t length) {
+    // Включаем запись
+    uint8_t wren_cmd = EEPROM_CMD_WREN;
+    EEPROM_CS_LOW();
+    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100);
+    EEPROM_CS_HIGH();
 
+    // Формируем команду записи
+    uint8_t cmd_buf[3] = {
+        EEPROM_CMD_WRITE,
+        (address >> 8) & 0xFF,
+        address & 0xFF
+    };
+
+    EEPROM_CS_LOW();
+    HAL_SPI_Transmit(&hspi1, cmd_buf, 3, 100);
+    HAL_SPI_Transmit(&hspi1, data, length, 100);
+    EEPROM_CS_HIGH();
+
+    // Ждем завершения записи
+    EEPROM_WaitReady();
+}
+
+// Функция для чтения массива из EEPROM
+void EEPROM_ReadArray(uint16_t start_address, uint8_t* data, uint16_t length) {
     for (uint16_t i = 0; i < length; i++) {
         data[i] = EEPROM_ReadByte(start_address + i);
     }
-
-    HAL_UART_Transmit(&huart1, (uint8_t*)"Prochitano\r\n", 12, 100);
 }
+
+
+// Функция для тестирования записи массива
+void EEPROM_TestArray(void) {
+    uint8_t test_array[75];
+    uint8_t read_array[75];
+    char msg[64];
+
+    // Заполняем тестовый массив
+    for (int i = 0; i < 75; i++) {
+        test_array[i] = i + 1; // Значения от 1 до 75
+    }
+
+    HAL_UART_Transmit(&huart1, (uint8_t*)"Writing array to EEPROM...\r\n", 29, 100);
+
+    // Записываем массив начиная с адреса 0x0100
+    EEPROM_WriteArrayPaged(0x0100, test_array, 75);
+
+    HAL_UART_Transmit(&huart1, (uint8_t*)"Reading array from EEPROM...\r\n", 31, 100);
+
+    // Читаем массив обратно
+    EEPROM_ReadArray(0x0100, read_array, 75);
+
+    // Проверяем правильность записи
+    uint8_t errors = 0;
+    for (int i = 0; i < 75; i++) {
+        if (test_array[i] != read_array[i]) {
+            errors++;
+            sprintf(msg, "Error at index %d: wrote 0x%02X, read 0x%02X\r\n",
+                   i, test_array[i], read_array[i]);
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
+        }
+    }
+
+    if (errors == 0) {
+        HAL_UART_Transmit(&huart1, (uint8_t*)"Array test PASSED\r\n", 19, 100);
+    } else {
+        sprintf(msg, "Array test FAILED: %d errors\r\n", errors);
+        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
+    }
+}
+
+
+/*
 
 void EEPROM_TestArray(void) {
     uint8_t test_array[75];
@@ -562,7 +637,7 @@ void EEPROM_TestArray(void) {
         test_array[i] = i + 1;
     }
 
-    EEPROM_WriteArray(0x0100, test_array, 75);
+    EEPROM_WriteArrayPaged(0x0100, test_array, 75);
 
     EEPROM_ReadArray(0x0100, read_array, 75);
 
@@ -583,6 +658,9 @@ void EEPROM_TestArray(void) {
     }
 }
 
+*/
+
+
 
 uint8_t EEPROM_ReadByte(uint16_t address) {
     uint8_t cmd_buf[3] = {
@@ -599,24 +677,6 @@ uint8_t EEPROM_ReadByte(uint16_t address) {
 
     return data;
 }
-
-/* УДАЛЕНИЕ
-void EEPROM_EraseChip(void) {
-    uint8_t wren_cmd = EEPROM_CMD_WREN;
-    uint8_t erase_cmd = EEPROM_CMD_CHIP_ERASE;
-
-    EEPROM_CS_LOW();
-    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100);
-    EEPROM_CS_HIGH();
-
-    EEPROM_CS_LOW();
-    HAL_SPI_Transmit(&hspi1, &erase_cmd, 1, 100);
-    EEPROM_CS_HIGH();
-
-    EEPROM_WaitReady();
-}
-*/
-
 
 
 
