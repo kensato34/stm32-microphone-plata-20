@@ -42,6 +42,8 @@
 #define EEPROM_CS_GPIO_Port GPIOB
 #define EEPROM_CS_Pin       GPIO_PIN_7
 
+#define EEPROM_SIZE 8192
+
 #define EEPROM_CMD_WREN     0x06
 #define EEPROM_CMD_WRDI     0x04
 #define EEPROM_CMD_RDSR     0x05
@@ -68,6 +70,9 @@ uint32_t previousMillis = 0;
 uint32_t currentMillis = 0;
 uint8_t pressed_key = 0;
 volatile uint8_t uart_ready = 1;
+uint16_t start_address = 0;
+uint16_t test_length = 0;
+char uart_buf[64];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,7 +88,7 @@ void indicate_key_with_leds(char key);
 void EEPROM_WriteByte(uint16_t address, uint8_t data);
 uint8_t EEPROM_ReadByte(uint16_t address);
 void EEPROM_Test(void);
-void EEPROM_TestArray(void);
+void EEPROM_TestArray(uint16_t start_address, uint8_t test_length);
 void EEPROM_EraseChip(void);
 void EEPROM_WritePageData(uint16_t address, uint8_t* data, uint16_t length);
 /* USER CODE END PFP */
@@ -135,7 +140,37 @@ int main(void)
 
 
  //EEPROM_Test();
- EEPROM_TestArray();
+  sprintf(uart_buf, "Enter start address:\r\n");
+  HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+  HAL_UART_Receive(&huart1, (uint8_t*)uart_buf, sizeof(uart_buf), HAL_MAX_DELAY);
+  sscanf(uart_buf, "%hx", &start_address);
+
+  if (sscanf(uart_buf, "%hx", &start_address) != 1) {
+      sprintf(uart_buf, "Error: invalid address.\r\n");
+      HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+      return;
+  }
+
+  if (start_address >= 0x2000) {
+      sprintf(uart_buf, "Error: address too large.\r\n");
+      HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+      return;
+  }
+
+
+
+  // Запрос длины
+  sprintf(uart_buf, "Enter test length:\r\n");
+  HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+ HAL_UART_Receive(&huart1, (uint8_t*)uart_buf, sizeof(uart_buf), HAL_MAX_DELAY);
+  sscanf(uart_buf, "%hu", &test_length);
+
+
+
+  // Запуск теста
+  EEPROM_TestArray(start_address, test_length);
+
+ // EEPROM_TestArray(0xFF34, 9999);
 
 
 
@@ -532,117 +567,82 @@ void EEPROM_WriteByte(uint16_t address, uint8_t data) {
 
 
 void EEPROM_WriteArrayPaged(uint16_t start_address, uint8_t* data, uint16_t length) {
-    const uint16_t PAGE_SIZE = 32; // Размер страницы для большинства EEPROM
+    uint16_t PAGE_SIZE = 32;
     uint16_t bytes_written = 0;
+
+
 
     while (bytes_written < length) {
         uint16_t current_address = start_address + bytes_written;
         uint16_t page_offset = current_address % PAGE_SIZE;
         uint16_t bytes_to_write = PAGE_SIZE - page_offset;
 
-        // Не записываем больше чем осталось данных
         if (bytes_to_write > (length - bytes_written)) {
             bytes_to_write = length - bytes_written;
         }
 
-        // Записываем страницу
-        EEPROM_WritePageData(current_address, &data[bytes_written], bytes_to_write);
+        EEPROM_WriteArray(current_address, &data[bytes_written], bytes_to_write);
         bytes_written += bytes_to_write;
     }
 }
 
-// Функция для записи страницы данных
-void EEPROM_WritePageData(uint16_t address, uint8_t* data, uint16_t length) {
-    // Включаем запись
-    uint8_t wren_cmd = EEPROM_CMD_WREN;
-    EEPROM_CS_LOW();
-    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100);
-    EEPROM_CS_HIGH();
 
-    // Формируем команду записи
+void EEPROM_WriteArray(uint16_t address, uint8_t* data, uint16_t length) {
+
     uint8_t cmd_buf[3] = {
         EEPROM_CMD_WRITE,
         (address >> 8) & 0xFF,
         address & 0xFF
     };
 
+    uint8_t wren_cmd = EEPROM_CMD_WREN;
+    EEPROM_CS_LOW();
+    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100);
+    EEPROM_CS_HIGH();
+
+
+
     EEPROM_CS_LOW();
     HAL_SPI_Transmit(&hspi1, cmd_buf, 3, 100);
     HAL_SPI_Transmit(&hspi1, data, length, 100);
     EEPROM_CS_HIGH();
 
-    // Ждем завершения записи
+
     EEPROM_WaitReady();
 }
 
-// Функция для чтения массива из EEPROM
+
 void EEPROM_ReadArray(uint16_t start_address, uint8_t* data, uint16_t length) {
-    for (uint16_t i = 0; i < length; i++) {
-        data[i] = EEPROM_ReadByte(start_address + i);
-    }
+    uint8_t cmd_buf[3] = {
+        EEPROM_CMD_READ,
+        (uint8_t)(start_address >> 8),
+        (uint8_t)(start_address & 0xFF)
+    };
+
+    EEPROM_CS_LOW();
+    HAL_SPI_Transmit(&hspi1, cmd_buf, 3, 100);
+    HAL_SPI_Receive(&hspi1, data, length, 1000);
+    EEPROM_CS_HIGH();
 }
 
 
-// Функция для тестирования записи массива
-void EEPROM_TestArray(void) {
-    uint8_t test_array[75];
-    uint8_t read_array[75];
+void EEPROM_TestArray(uint16_t start_address , uint8_t test_length) {
+    uint8_t* test_array = (uint8_t*)malloc(test_length);
+    uint8_t* read_array = (uint8_t*)malloc(test_length);
     char msg[64];
-
-    // Заполняем тестовый массив
-    for (int i = 0; i < 75; i++) {
-        test_array[i] = i + 1; // Значения от 1 до 75
-    }
-
-    HAL_UART_Transmit(&huart1, (uint8_t*)"Writing array to EEPROM...\r\n", 29, 100);
-
-    // Записываем массив начиная с адреса 0x0100
-    EEPROM_WriteArrayPaged(0x0100, test_array, 75);
-
-    HAL_UART_Transmit(&huart1, (uint8_t*)"Reading array from EEPROM...\r\n", 31, 100);
-
-    // Читаем массив обратно
-    EEPROM_ReadArray(0x0100, read_array, 75);
-
-    // Проверяем правильность записи
-    uint8_t errors = 0;
-    for (int i = 0; i < 75; i++) {
-        if (test_array[i] != read_array[i]) {
-            errors++;
-            sprintf(msg, "Error at index %d: wrote 0x%02X, read 0x%02X\r\n",
-                   i, test_array[i], read_array[i]);
-            HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
-        }
-    }
-
-    if (errors == 0) {
-        HAL_UART_Transmit(&huart1, (uint8_t*)"Array test PASSED\r\n", 19, 100);
-    } else {
-        sprintf(msg, "Array test FAILED: %d errors\r\n", errors);
-        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
-    }
-}
-
-
-/*
-
-void EEPROM_TestArray(void) {
-    uint8_t test_array[75];
-    uint8_t read_array[75];
-    char msg[40];
 
     HAL_UART_Transmit(&huart1, (uint8_t*)"Start TestArray\r\n", 17, 100);
 
-    for (int i = 0; i < 75; i++) {
-        test_array[i] = i + 1;
+    for (int i = 0; i < test_length; i++) {
+        test_array[i] = i & 0xFF;
     }
 
-    EEPROM_WriteArrayPaged(0x0100, test_array, 75);
+    EEPROM_WriteArrayPaged(start_address, test_array, test_length);
 
-    EEPROM_ReadArray(0x0100, read_array, 75);
+    EEPROM_ReadArray(start_address, read_array, test_length);
 
     uint8_t errors = 0;
-    for (int i = 0; i < 75; i++) {
+    for (int i = 0; i < test_length; i++) {
         if (test_array[i] != read_array[i]) {
             errors++;
             sprintf(msg, "Error: wrote 0x%02X, read 0x%02X\r\n", test_array[i], read_array[i]);
@@ -651,14 +651,17 @@ void EEPROM_TestArray(void) {
     }
 
     if (errors == 0) {
-        HAL_UART_Transmit(&huart1, (uint8_t*)"All 75 bytes OK!\r\n", 20, 100);
+        HAL_UART_Transmit(&huart1, (uint8_t*)"Array test is OK!\r\n", 20, 100);
     } else {
         sprintf(msg, "%d errors found\r\n", errors);
         HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
     }
+
+    free(test_array);
+    free(read_array);
 }
 
-*/
+
 
 
 
